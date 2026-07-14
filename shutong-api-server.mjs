@@ -7,7 +7,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
@@ -18,6 +18,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.6-terra';
 const REQUEST_LIMIT = 30_000;
 const MODEL_TIMEOUT_MS = 15_000;
 const APP_ACCESS_PASSWORD = process.env.APP_ACCESS_PASSWORD || '';
+const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 
 // 生成模型只能从这份经临床团队审核的低风险行动库中选择，不能编造医疗建议。
 const ACTIONS = [
@@ -36,11 +37,13 @@ const actionIds = ACTIONS.map(([id]) => id);
 
 const schema = {
   type: 'object', additionalProperties: false,
-  required: ['headline', 'why', 'goal_statement', 'action_ids'],
+  required: ['headline', 'why', 'goal_statement', 'weekly_rhythm', 'today_action_id', 'action_ids'],
   properties: {
     headline: { type: 'string', maxLength: 48 },
     why: { type: 'string', maxLength: 140 },
     goal_statement: { type: 'string', maxLength: 96 },
+    weekly_rhythm: { type: 'string', maxLength: 180 },
+    today_action_id: { type: 'string', enum: actionIds },
     action_ids: { type: 'array', minItems: 2, maxItems: 3, uniqueItems: true, items: { type: 'string', enum: actionIds } }
   }
 };
@@ -49,18 +52,48 @@ function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end(JSON.stringify(body));
 }
+function html(res, status, body) {
+  res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
+  res.end(body);
+}
+function passwordMatches(password) {
+  const expected = Buffer.from(APP_ACCESS_PASSWORD);
+  const actual = Buffer.from(String(password || ''));
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+function cookieValue(req, name) {
+  const match = String(req.headers.cookie || '').split(';').map(item => item.trim()).find(item => item.startsWith(`${name}=`));
+  return match ? decodeURIComponent(match.slice(name.length + 1)) : '';
+}
+function sessionSignature(expiresAt) {
+  return createHmac('sha256', APP_ACCESS_PASSWORD).update(`shutong-session:${expiresAt}`).digest('base64url');
+}
+function hasValidSession(req) {
+  const [expiresAt, signature] = cookieValue(req, 'shutong_session').split('.');
+  if (!/^\d+$/.test(expiresAt || '') || Number(expiresAt) <= Date.now() || !signature) return false;
+  const expected = Buffer.from(sessionSignature(expiresAt));
+  const actual = Buffer.from(signature);
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
 function isAuthorized(req) {
   if (!APP_ACCESS_PASSWORD) return true;
+  if (hasValidSession(req)) return true;
   const encoded = String(req.headers.authorization || '').replace(/^Basic\s+/i, '');
   let password = '';
   try { password = Buffer.from(encoded, 'base64').toString('utf8').split(':').slice(1).join(':'); } catch { return false; }
-  const expected = Buffer.from(APP_ACCESS_PASSWORD);
-  const actual = Buffer.from(password);
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  return passwordMatches(password);
 }
-function requestAuth(res) {
-  res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'www-authenticate': 'Basic realm="Shutong", charset="UTF-8"', 'cache-control': 'no-store' });
-  res.end('需要访问密码。');
+function loginPage(error = '') {
+  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>舒痛 · 访问验证</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f3f7f6;color:#14383a;font-family:"Microsoft YaHei",sans-serif}.box{width:min(360px,calc(100% - 40px);padding:30px;border:1px solid #d8e8e5;border-radius:22px;background:#fff;box-shadow:0 18px 48px #19433e20}h1{margin:0 0 8px;font-size:25px}p{color:#67817e;font-size:14px;line-height:1.65}.error{color:#a83832;background:#fff0ef;padding:9px 11px;border-radius:10px}input,button{box-sizing:border-box;width:100%;font:inherit;border-radius:12px}input{margin:12px 0;border:1px solid #b9d8d3;padding:13px}button{border:0;background:#087d72;color:#fff;padding:13px;font-weight:700;cursor:pointer}.foot{margin-top:18px;font-size:12px;color:#67817e}</style><main class="box"><h1>舒痛</h1><p>请输入访问密码，继续使用个人疼痛管理工具。</p>${error ? `<div class="error">${error}</div>` : ''}<form method="post" action="/login"><input name="password" type="password" autocomplete="current-password" autofocus required placeholder="访问密码"><button type="submit">进入舒痛</button></form><p class="foot">此工具用于自我记录与行动支持，不提供诊断或处方。</p></main></html>`;
+}
+async function requestBody(req) {
+  let raw = '';
+  for await (const chunk of req) { raw += chunk; if (raw.length > REQUEST_LIMIT) throw new Error('Request too large'); }
+  return raw;
+}
+function redirect(res, location, headers = {}) {
+  res.writeHead(303, { location, 'cache-control': 'no-store', ...headers });
+  res.end();
 }
 function publicError(error) {
   const message = error instanceof Error ? error.message : '';
@@ -104,7 +137,15 @@ function safePlan(payload) {
   const picked = Array.isArray(payload?.action_ids) ? payload.action_ids.filter(id => actionMap[id]).slice(0, 3) : [];
   const goalStatement = safeModelText(payload?.goal_statement, 96);
   if (picked.length < 2 || !goalStatement) return null;
-  return { headline: safeModelText(payload?.headline, 48) || '从一个小而可调整的行动开始', why: safeModelText(payload?.why, 140) || '根据你的目标，先安排可观察、可调整的低风险行动。', goal_statement: goalStatement, actions: picked.map(id => actionMap[id]) };
+  const todayActionId = picked.includes(payload?.today_action_id) ? payload.today_action_id : picked[0];
+  return {
+    headline: safeModelText(payload?.headline, 48) || '从一个小而可调整的行动开始',
+    why: safeModelText(payload?.why, 140) || '根据你的目标，先安排可观察、可调整的低风险行动。',
+    goal_statement: goalStatement,
+    weekly_rhythm: safeModelText(payload?.weekly_rhythm, 180) || '本周先用小幅、可调整的节奏练习这些行动；任何不适加重或出现新症状时先暂停并联系专业人员。',
+    today_action_id: todayActionId,
+    actions: picked.map(id => actionMap[id])
+  };
 }
 function safeModelText(value, max) {
   if (typeof value !== 'string') return null;
@@ -112,7 +153,7 @@ function safeModelText(value, max) {
   return text && !/(诊断|处方|药物|剂量|加量|减量)/.test(text) ? text : null;
 }
 async function createPlan(context) {
-  const instructions = `You select a small, achievable self-management plan from an approved action library for an adult pain-management education product. This is NOT diagnosis or medical treatment. Do not recommend medication, doses, exercises beyond the library, stretching, loading, or claims of cure. Do not use pain scores as a target. Choose 2 or 3 action_ids only from the provided list. Also provide goal_statement: a concise Chinese restatement of the user's life/function goal, not a medical goal and not an instruction. Aggregate action feedback may be supplied; use it only to prefer a smaller, more adjustable action selection when pauses are reported. Do not infer a cause. If the context has urgent symptoms, the client must not call this endpoint; do not make triage claims. Write concise Chinese.\n\nApproved action IDs:\n${ACTIONS.map(([id, title, detail]) => `- ${id}: ${title}; ${detail}`).join('\n')}`;
+  const instructions = `You select a small, achievable self-management plan from an approved action library for an adult pain-management education product. This is NOT diagnosis or medical treatment. Do not recommend medication, doses, exercises beyond the library, stretching, loading, or claims of cure. Do not use pain scores as a target. Choose 2 or 3 action_ids only from the provided list. Also provide goal_statement: a concise Chinese restatement of the user's life/function goal, not a medical goal and not an instruction. Provide weekly_rhythm: one concise Chinese sentence describing a flexible, non-medical rhythm for this week. Provide today_action_id: exactly one id from the selected action_ids that is most suitable as today's first step. Aggregate action feedback may be supplied; use it only to prefer a smaller, more adjustable action selection when pauses are reported. Do not infer a cause. If the context has urgent symptoms, the client must not call this endpoint; do not make triage claims. Write concise Chinese.\n\nApproved action IDs:\n${ACTIONS.map(([id, title, detail]) => `- ${id}: ${title}; ${detail}`).join('\n')}`;
   if (PROVIDER === 'deepseek') return createDeepSeekPlan(context, instructions);
   if (PROVIDER === 'openai') return createOpenAIPlan(context, instructions);
   throw new Error(`Unsupported AI_PROVIDER: ${PROVIDER}`);
@@ -125,7 +166,7 @@ async function createDeepSeekPlan(context, instructions) {
     body: JSON.stringify({
       model: DEEPSEEK_MODEL,
       messages: [
-        { role: 'system', content: `${instructions}\n\nReturn one JSON object with only headline, why, goal_statement and action_ids.` },
+        { role: 'system', content: `${instructions}\n\nReturn one JSON object with only headline, why, goal_statement, weekly_rhythm, today_action_id and action_ids.` },
         { role: 'user', content: JSON.stringify(context) }
       ],
       response_format: { type: 'json_object' },
@@ -161,7 +202,27 @@ async function createOpenAIPlan(context, instructions) {
 
 createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  if (!isAuthorized(req) && !(req.method === 'GET' && url.pathname === '/api/health')) return requestAuth(res);
+  if (APP_ACCESS_PASSWORD && req.method === 'GET' && url.pathname === '/login') {
+    if (isAuthorized(req)) return redirect(res, '/');
+    return html(res, 200, loginPage());
+  }
+  if (APP_ACCESS_PASSWORD && req.method === 'POST' && url.pathname === '/login') {
+    let password = '';
+    try { password = new URLSearchParams(await requestBody(req)).get('password') || ''; }
+    catch { return html(res, 413, loginPage('提交内容过大，请重试。')); }
+    if (!passwordMatches(password)) return html(res, 401, loginPage('访问密码不正确，请重试。'));
+    const expiresAt = Date.now() + SESSION_TTL_SECONDS * 1000;
+    const token = `${expiresAt}.${sessionSignature(expiresAt)}`;
+    const secure = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https' || req.socket.encrypted ? '; Secure' : '';
+    return redirect(res, '/', { 'set-cookie': `shutong_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}${secure}` });
+  }
+  if (APP_ACCESS_PASSWORD && req.method === 'POST' && url.pathname === '/logout') {
+    return redirect(res, '/login', { 'set-cookie': 'shutong_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0' });
+  }
+  if (!isAuthorized(req) && !(req.method === 'GET' && url.pathname === '/api/health')) {
+    if (url.pathname.startsWith('/api/')) return json(res, 401, { error: 'AUTH_REQUIRED', message: '请重新输入访问密码。' });
+    return redirect(res, '/login');
+  }
   const origin = req.headers.origin;
   if (origin === 'null' || origin === `http://localhost:${PORT}` || origin === `http://127.0.0.1:${PORT}` || origin === `http://${req.headers.host}`) res.setHeader('access-control-allow-origin', origin);
   if (req.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
@@ -173,7 +234,8 @@ createServer(async (req, res) => {
   if (req.method === 'POST' && (url.pathname === '/api/goal' || url.pathname === '/api/plan')) {
     if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) return json(res, 415, { error: 'Expected JSON request' });
     let raw = '';
-    for await (const chunk of req) { raw += chunk; if (raw.length > REQUEST_LIMIT) return json(res, 413, { error: 'Request too large' }); }
+    try { raw = await requestBody(req); }
+    catch { return json(res, 413, { error: 'Request too large' }); }
     let context;
     try { context = safeContext(JSON.parse(raw || '{}')); }
     catch { return json(res, 400, { error: 'Invalid JSON request' }); }
