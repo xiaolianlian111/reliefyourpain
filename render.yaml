@@ -2,6 +2,7 @@ services:
   - type: web
     name: shutong-personal
     runtime: node
+    plan: free
     buildCommand: "true"
     startCommand: npm start
     healthCheckPath: /api/health
