@@ -119,6 +119,7 @@ function safeContext(value) {
   return {
     goal: cleanText(value.goal, 120),
     goal_note: cleanText(value.goal_note, 240),
+    short_term: value.short_term === true,
     latest_record: {
       pain_intensity: Number.isFinite(intensity) && intensity >= 0 && intensity <= 10 ? intensity : null,
       sites: cleanList(record.sites), qualities: cleanList(record.qualities), function_impact: cleanList(record.function_impact)
@@ -153,7 +154,7 @@ function safeModelText(value, max) {
   return text && !/(诊断|处方|药物|剂量|加量|减量)/.test(text) ? text : null;
 }
 async function createPlan(context) {
-  const instructions = `You select a small, achievable self-management plan from an approved action library for an adult pain-management education product. This is NOT diagnosis or medical treatment. Do not recommend medication, doses, exercises beyond the library, stretching, loading, or claims of cure. Do not use pain scores as a target. Choose 2 or 3 action_ids only from the provided list. Also provide goal_statement: a concise Chinese restatement of the user's life/function goal, not a medical goal and not an instruction. Provide weekly_rhythm: one concise Chinese sentence describing a flexible, non-medical rhythm for this week. Provide today_action_id: exactly one id from the selected action_ids that is most suitable as today's first step. Aggregate action feedback may be supplied; use it only to prefer a smaller, more adjustable action selection when pauses are reported. Do not infer a cause. If the context has urgent symptoms, the client must not call this endpoint; do not make triage claims. Write concise Chinese.\n\nApproved action IDs:\n${ACTIONS.map(([id, title, detail]) => `- ${id}: ${title}; ${detail}`).join('\n')}`;
+  const instructions = `You select a small, achievable self-management plan from an approved action library for an adult pain-management education product. This is NOT diagnosis or medical treatment. Do not recommend medication, doses, exercises beyond the library, stretching, loading, or claims of cure. Do not use pain scores as a target. Choose 2 or 3 action_ids only from the provided list. Also provide goal_statement: a concise Chinese restatement of the user's life/function goal, not a medical goal and not an instruction. Provide weekly_rhythm: one concise Chinese sentence describing a flexible, non-medical rhythm for this week. Provide today_action_id: exactly one id from the selected action_ids that is most suitable as today's first step. When short_term is true, make the headline and selected actions suitable for a small, immediately doable adjustment after the just-recorded symptoms; do not mention diagnosis, treatment, or a recovery promise. Aggregate action feedback may be supplied; use it only to prefer a smaller, more adjustable action selection when pauses are reported. Do not infer a cause. If the context has urgent symptoms, the client must not call this endpoint; do not make triage claims. Write concise Chinese.\n\nApproved action IDs:\n${ACTIONS.map(([id, title, detail]) => `- ${id}: ${title}; ${detail}`).join('\n')}`;
   if (PROVIDER === 'deepseek') return createDeepSeekPlan(context, instructions);
   if (PROVIDER === 'openai') return createOpenAIPlan(context, instructions);
   throw new Error(`Unsupported AI_PROVIDER: ${PROVIDER}`);
