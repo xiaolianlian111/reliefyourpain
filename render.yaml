@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: shutong-personal
+    runtime: node
+    buildCommand: "true"
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.13.1
+      - key: HOST
+        value: 0.0.0.0
+      - key: AI_PROVIDER
+        value: deepseek
+      - key: DEEPSEEK_MODEL
+        value: deepseek-v4-flash
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: APP_ACCESS_PASSWORD
+        sync: false

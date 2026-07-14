@@ -1,0 +1,13 @@
+{
+  "name": "shutong-pain-management",
+  "version": "1.0.0",
+  "private": true,
+  "description": "舒痛：个人疼痛记录与行动计划工具",
+  "scripts": {
+    "start": "node shutong-api-server.mjs",
+    "check": "node --check shutong-api-server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
